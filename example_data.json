@@ -28,8 +28,12 @@
     "Amount": 0.01
   },
   {
-    "Name": "Cash",
+    "Name": "High Yield Savings",
     "AssetClass": "Cash",
-    "Amount": 200
+    "Amount": 200,
+    "InterestRate": 4.3,
+    "PaymentFrequencyDays": 1,
+    "LastInterestPayment": "2025-08-03",
+    "NextInterestPayment": "2025-08-04"
   }
 ]

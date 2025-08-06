@@ -35,6 +35,28 @@ impl Portfolio {
         sum
     }
 
+    /// Update all cash positions with interest payments if due
+    pub fn update_interest_payments(&mut self, current_date: DateTime<Utc>) -> Vec<(String, f64)> {
+        let mut interest_payments = Vec::new();
+        
+        for position in &mut self.positions {
+            if let Some(interest) = position.apply_interest_if_due(current_date) {
+                let name = position.get_name().to_string();
+                interest_payments.push((name, interest));
+            }
+        }
+        
+        interest_payments
+    }
+
+    /// Get all cash positions with their interest information
+    pub fn get_cash_positions_with_interest(&self) -> Vec<&PortfolioPosition> {
+        self.positions
+            .iter()
+            .filter(|p| p.is_cash_with_interest())
+            .collect()
+    }
+
     // Get the total value of the portfolio at a specific date
     // TODO: this function is not working as intended and the y_response is often an error
     pub async fn get_historic_total_value(&self, date: DateTime<Utc>) -> Result<f64, String> {

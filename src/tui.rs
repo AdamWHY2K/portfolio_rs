@@ -257,6 +257,23 @@ impl App {
         self.flash_state = !self.flash_state; // Toggle flash state for animation
     }
 
+    /// Apply interest payments and save to file if any payments were made
+    pub fn apply_interest_and_save(&mut self) -> Result<Vec<(String, f64)>, String> {
+        if let Some(portfolio) = &mut self.portfolio {
+            let current_date = chrono::Utc::now();
+            let interest_payments = portfolio.update_interest_payments(current_date);
+            
+            // Save to file if any interest was applied
+            if !interest_payments.is_empty() {
+                self.save_to_file()?;
+            }
+            
+            Ok(interest_payments)
+        } else {
+            Err("No portfolio loaded".to_string())
+        }
+    }
+
     pub fn get_trend_color(&self, name: &str, base_color: Color) -> Color {
         match self.trends.get(name) {
             Some(Trend::Up) => {
@@ -368,6 +385,39 @@ impl App {
                         ),
                     );
 
+                    // Add interest rate fields for cash assets
+                    if let Some(rate) = pos.get_interest_rate() {
+                        obj.insert(
+                            "InterestRate".to_string(),
+                            serde_json::Value::Number(
+                                serde_json::Number::from_f64(rate).unwrap(),
+                            ),
+                        );
+                    }
+
+                    if let Some(frequency) = pos.get_payment_frequency_days() {
+                        obj.insert(
+                            "PaymentFrequencyDays".to_string(),
+                            serde_json::Value::Number(
+                                serde_json::Number::from(frequency),
+                            ),
+                        );
+                    }
+
+                    if let Some(last_payment) = pos.get_last_interest_payment() {
+                        obj.insert(
+                            "LastInterestPayment".to_string(),
+                            serde_json::Value::String(last_payment.format("%Y-%m-%d").to_string()),
+                        );
+                    }
+
+                    if let Some(next_payment) = pos.get_next_interest_payment() {
+                        obj.insert(
+                            "NextInterestPayment".to_string(),
+                            serde_json::Value::String(next_payment.format("%Y-%m-%d").to_string()),
+                        );
+                    }
+
                     serde_json::Value::Object(obj)
                 })
                 .collect();
@@ -437,11 +487,32 @@ pub async fn run_tui(
 }
 
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
+    let mut last_interest_check = std::time::Instant::now();
+    let interest_check_interval = std::time::Duration::from_secs(60); // Check every minute
+    
     loop {
         terminal.draw(|f| ui(f, app))?;
 
         // Check for portfolio updates from background task (non-blocking)
         app.try_receive_portfolio_update();
+
+        // Periodically check for interest payments
+        if last_interest_check.elapsed() >= interest_check_interval {
+            match app.apply_interest_and_save() {
+                Ok(payments) => {
+                    if !payments.is_empty() {
+                        // Interest was applied - could show notification here
+                        for (name, amount) in payments {
+                            eprintln!("Interest applied: {} received {:.2}", name, amount);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Error applying interest - could log this
+                }
+            }
+            last_interest_check = std::time::Instant::now();
+        }
 
         // Use poll to check for events with timeout
         if crossterm::event::poll(Duration::from_millis(100))? {
@@ -748,7 +819,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_balances(f: &mut Frame, area: Rect, app: &App) {
     if let Some(portfolio) = &app.portfolio {
-        let header_cells = ["Name", "Asset Class", "Amount", "Balance"]
+        let header_cells = ["Name", "Asset Class", "Amount", "Balance", "Interest"]
             .iter()
             .map(|h| {
                 Cell::from(*h).style(
@@ -777,6 +848,18 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
                 format!("○ {}", position.get_name()) // Static data indicator
             };
 
+            // Interest information for cash assets
+            let interest_info = if position.is_cash_with_interest() {
+                if let Some(rate) = position.get_interest_rate() {
+                    let daily_interest = position.daily_interest_amount();
+                    format!("{:.2}% ({:.2}/day)", rate, daily_interest)
+                } else {
+                    "-".to_string()
+                }
+            } else {
+                "-".to_string()
+            };
+
             let cells = vec![
                 Cell::from(name_with_indicator).style(Style::default().fg(balance_color)),
                 Cell::from(position.get_asset_class()).style(Style::default().fg(balance_color)),
@@ -784,11 +867,23 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
                     .style(Style::default().fg(balance_color)),
                 Cell::from(format_currency(position.get_balance(), &app.currency))
                     .style(Style::default().fg(balance_color)),
+                Cell::from(interest_info).style(Style::default().fg(
+                    if position.is_cash_with_interest() {
+                        Color::Green
+                    } else {
+                        Color::Gray
+                    }
+                )),
             ];
             Row::new(cells).height(1).style(row_style)
         });
 
         let total_value = portfolio.get_total_value();
+        let total_daily_interest: f64 = portfolio.positions.iter()
+            .filter(|p| p.is_cash_with_interest())
+            .map(|p| p.daily_interest_amount())
+            .sum();
+        
         let total_row = Row::new(vec![
             Cell::from("TOTAL").style(
                 Style::default()
@@ -798,6 +893,11 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
             Cell::from(""),
             Cell::from(""),
             Cell::from(format_currency(total_value, &app.currency)).style(
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Cell::from(format!("{:.2}/day", total_daily_interest)).style(
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -815,10 +915,11 @@ fn render_balances(f: &mut Frame, area: Rect, app: &App) {
         let table = Table::new(
             rows.chain(std::iter::once(total_row)),
             [
-                Constraint::Percentage(30),
+                Constraint::Percentage(25),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+                Constraint::Percentage(25),
                 Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(30),
             ],
         )
         .header(header)
@@ -896,7 +997,25 @@ fn render_edit_dialog(f: &mut Frame, app: &App) {
                 "Current Balance: {}",
                 format_currency(position.get_balance(), &app.currency)
             );
-            let current_text = format!("{current_value}\n{current_balance}");
+            
+            let mut current_text = format!("{current_value}\n{current_balance}");
+            
+            // Add interest information for cash assets
+            if position.is_cash_with_interest() {
+                if let Some(rate) = position.get_interest_rate() {
+                    let daily_interest = position.daily_interest_amount();
+                    current_text.push_str(&format!("\nInterest Rate: {:.2}% APY", rate));
+                    current_text.push_str(&format!("\nDaily Interest: {}", format_currency(daily_interest, &app.currency)));
+                    
+                    if let Some(frequency) = position.get_payment_frequency_days() {
+                        current_text.push_str(&format!("\nPayment Frequency: {} days", frequency));
+                    }
+                    
+                    if let Some(next_payment) = position.get_next_interest_payment() {
+                        current_text.push_str(&format!("\nNext Payment: {}", next_payment.format("%Y-%m-%d")));
+                    }
+                }
+            }
 
             let current_paragraph = Paragraph::new(current_text)
                 .style(Style::default().fg(Color::Gray))

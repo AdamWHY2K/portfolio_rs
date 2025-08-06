@@ -117,6 +117,17 @@ pub async fn create_live_portfolio_with_logging(
         }
     }
 
+    // Apply interest payments for cash positions
+    let current_date = chrono::Utc::now();
+    let interest_payments = portfolio.update_interest_payments(current_date);
+    
+    // Log interest payments if any were applied
+    if !interest_payments.is_empty() && log_errors {
+        for (name, amount) in &interest_payments {
+            println!("Interest payment applied: {} received {:.2}", name, amount);
+        }
+    }
+
     let network_status = if failed_positions == 0 {
         crate::tui::NetworkStatus::Connected
     } else if successful_positions == 0 {
